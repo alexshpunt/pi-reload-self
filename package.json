@@ -31,11 +31,11 @@
     "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=0.84.2",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.9",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
     "@types/node": "^22.15.32",
     "tsx": "^4.20.3",
     "typebox": "^1.0.55",

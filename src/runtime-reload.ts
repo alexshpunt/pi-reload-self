@@ -1,25 +1,9 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
 const CONTINUATION_SLOT = "__piReloadSelfContinuationPrompt";
-const PATCH_SLOT = "__piReloadSelfExtensionContextReloadPatch";
+const PENDING_COMMAND_SLOT = "__piReloadSelfPendingCommand";
 
 interface ReloadSelfGlobalState {
   [CONTINUATION_SLOT]?: string;
-  [PATCH_SLOT]?: boolean;
-}
-
-interface ReloadableContext {
-  reload?: () => Promise<void>;
-}
-
-interface ExtensionRunnerPrototype {
-  createContext: (this: ExtensionRunnerInstance) => object;
-}
-
-interface ExtensionRunnerInstance {
-  assertActive?: () => void;
-  reloadHandler?: () => Promise<void>;
+  [PENDING_COMMAND_SLOT]?: string;
 }
 
 function globalState(): ReloadSelfGlobalState {
@@ -37,40 +21,22 @@ export function takeContinuationPrompt(): string | undefined {
   return prompt;
 }
 
-export async function installToolContextReloadPatch(): Promise<boolean> {
+/** Store one encoded command until the current agent run has settled. */
+export function storePendingReloadCommand(command: string): boolean {
   const state = globalState();
-  if (state[PATCH_SLOT]) return true;
+  if (state[PENDING_COMMAND_SLOT]) return false;
+  state[PENDING_COMMAND_SLOT] = command;
+  return true;
+}
 
-  try {
-    const packageEntryUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-    const packageDistDir = dirname(fileURLToPath(packageEntryUrl));
-    const runnerUrl = pathToFileURL(join(packageDistDir, "core/extensions/runner.js")).href;
-    const module = (await import(runnerUrl)) as {
-      ExtensionRunner?: { prototype?: ExtensionRunnerPrototype };
-    };
-    const prototype = module.ExtensionRunner?.prototype;
-    if (!prototype || typeof prototype.createContext !== "function") {
-      return false;
-    }
+export function takePendingReloadCommand(): string | undefined {
+  const state = globalState();
+  const command = state[PENDING_COMMAND_SLOT];
+  delete state[PENDING_COMMAND_SLOT];
+  return command;
+}
 
-    const originalCreateContext = prototype.createContext;
-    prototype.createContext = function patchedCreateContext(this: ExtensionRunnerInstance) {
-      const context = originalCreateContext.call(this) as ReloadableContext;
-      if (typeof context.reload !== "function") {
-        context.reload = async () => {
-          this.assertActive?.();
-          if (typeof this.reloadHandler !== "function") {
-            throw new Error("Pi reload handler is unavailable");
-          }
-          await this.reloadHandler();
-        };
-      }
-      return context;
-    };
-
-    state[PATCH_SLOT] = true;
-    return true;
-  } catch {
-    return false;
-  }
+/** Drop a command that cannot belong to a newly started/reloaded session. */
+export function clearPendingReloadCommand(): void {
+  delete globalState()[PENDING_COMMAND_SLOT];
 }

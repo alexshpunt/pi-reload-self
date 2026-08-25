@@ -46,15 +46,16 @@ pi install /path/to/pi-reload-self
 
 Flow:
 
-1. The tool validates the prompt and confirmation.
-2. If the running Pi version exposes reload from tool context, it reloads directly and sends the continuation prompt.
-3. Otherwise, it fills the editor with an internal `/pi-reload-self-run ...` command for you to submit.
-4. The command calls Pi's reload flow.
-5. After reload, the continuation prompt is sent as a follow-up user message.
+1. The tool validates the prompt and confirmation, then stores one encoded internal `/pi-reload-self-run ...` command as pending state.
+2. On Pi's public `agent_settled` event, after the originating run and any automatic continuation work are finished, the extension dispatches that command with `expandPromptTemplates: true`.
+3. Pi invokes the command's `ExtensionCommandContext`; because the agent is idle, it calls `await ctx.reload()`.
+4. The reloaded extension runtime sends the continuation prompt as a follow-up user message.
 
-The extension reloads in place; it does not create a new session.
+The extension reloads in place; it does not create a new session. The pending command is consumed once at `agent_settled`, and is cleared if a session is replaced/reloaded before it settles. The command handoff uses Pi's public command-dispatch API; no Pi internal modules are patched and no manual editor submission is required.
 
-In Pi 0.79.x, tool contexts do not expose `ctx.reload()`, and extension-injected slash commands are delivered as chat rather than executed as commands. In that case, submit the prefilled `/pi-reload-self-run ...` command manually to complete the reload.
+## Compatibility
+
+Requires Pi `>=0.84.2`. Pi's changelog identifies `ctx.reload()` in 0.52.9, `agent_settled` in 0.80.4, and `expandPromptTemplates` command dispatch in 0.84.2; 0.84.3 is the live-tested release for this extension.
 
 ## Development
 
