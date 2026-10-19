@@ -341,3 +341,30 @@ test("session invalidation during a command check never reads the old context ag
   finish();
   await assert.doesNotReject(async () => { await pending; });
 });
+
+test("a run starting during the final probe defers reload without losing its continuation", async () => {
+  let idle = true;
+  let checks = 0;
+  let reloads = 0;
+  const { commands, handlers, sentUserMessages } = await loadExtension(async () => {
+    checks += 1;
+    if (checks === 1) idle = false;
+    return { ok: true, cwd: "/session/current", reason: "ready", diagnostics: [] };
+  });
+  const command = commands.get("pi-reload-self-run")!;
+  const context = { isIdle: () => idle, reload: async () => { reloads += 1; } };
+  const payload = encodeReloadPayload({ continuationPrompt: "continue exactly once" });
+  await command.handler(payload, context);
+  assert.equal(reloads, 0);
+  idle = true;
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  assert.equal(sentUserMessages.length, 1);
+  await command.handler(sentUserMessages[0].content, context);
+  assert.equal(reloads, 1);
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  assert.deepEqual(sentUserMessages[1], {
+    content: "continue exactly once", options: { deliverAs: "followUp" },
+  });
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  assert.equal(sentUserMessages.length, 2);
+});
