@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { createProbeLaunch } from "./probe-launch.ts";
 import { probeStartup, type StartupProbeResult } from "./startup-probe.ts";
+import { publishReloadOutcome, registerReloadOutcomeRenderer, type ReloadOrigin } from "./reload-outcome.ts";
 
 import {
   decodeReloadPayload,
@@ -37,6 +39,17 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
   let lifetime = new AbortController();
   let generation = 0;
   let checking = false;
+  const roots = new Map<string, string>();
+  const requests = new Map<string, ReloadOrigin>();
+  registerReloadOutcomeRenderer(pi);
+  const ownsBranch = (origin: ReloadOrigin, ctx: ExtensionContext) =>
+    origin.sessionId === ctx.sessionManager.getSessionId() &&
+    (origin.anchorId === null || ctx.sessionManager.getBranch().some(entry => entry.id === origin.anchorId));
+  pi.on("tool_execution_start", event => {
+    roots.set(event.toolCallId, event.parentToolCallId === undefined
+      ? event.toolCallId : roots.get(event.parentToolCallId) ?? event.parentToolCallId);
+  });
+  pi.on("tool_execution_end", event => { roots.delete(event.toolCallId); });
   const checkStartup: StartupCheck = async (ctx, signal) => {
     const currentGeneration = generation;
     const cwd = ctx.cwd;
@@ -54,7 +67,15 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
   };
 
   pi.on("session_shutdown", async () => { lifetime.abort(); });
-  pi.on("session_start", async (_event, _ctx) => {
+  pi.on("session_tree", () => {
+    lifetime.abort();
+    lifetime = new AbortController();
+    generation += 1;
+    roots.clear();
+    requests.clear();
+    clearPendingReloadCommand();
+  });
+  pi.on("session_start", async (event, ctx) => {
     lifetime.abort();
     lifetime = new AbortController();
     generation += 1;
@@ -62,9 +83,12 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
     // replaced or reloaded before that run settles, do not carry it forward.
     clearPendingReloadCommand();
 
-    const continuationPrompt = takeContinuationPrompt();
-    if (continuationPrompt) {
-      pi.sendUserMessage(continuationPrompt, { deliverAs: "followUp" });
+    roots.clear();
+    requests.clear();
+    const continuation = takeContinuationPrompt();
+    if (continuation && (!continuation.outcome || (event.reason === "reload" && ownsBranch(continuation.outcome, ctx)))) {
+      if (continuation.outcome) publishReloadOutcome(pi, continuation.outcome);
+      pi.sendUserMessage(continuation.prompt, { deliverAs: "followUp" });
     }
   });
 
@@ -83,22 +107,30 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
   pi.registerCommand(COMMAND_NAME, {
     description: "Internal command used by pi_extension_dev_reload_self to reload Pi and continue",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      let continuationPrompt: string;
+      let payload: ReturnType<typeof decodeReloadPayload>;
 
       try {
-        continuationPrompt = decodeReloadPayload(extractReloadPayloadToken(args, COMMAND_NAME)).continuationPrompt;
+        payload = decodeReloadPayload(extractReloadPayloadToken(args, COMMAND_NAME));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui?.notify(`pi-reload-self: ${message}`, "error");
         return;
       }
 
+      const { continuationPrompt, requestId } = payload;
+      const origin = requestId === undefined ? undefined : requests.get(requestId);
+      // A copied, consumed or stale command cannot manufacture execution ownership.
+      if (requestId !== undefined && (!origin || !ownsBranch(origin, ctx))) {
+        requests.delete(requestId);
+        ctx.ui?.notify("pi-reload-self: reload request no longer belongs to this session branch", "warning");
+        return;
+      }
       if (checking) {
         ctx.ui?.notify("pi-reload-self: a startup check is already running", "warning");
         return;
       }
       const deferReload = () => {
-        const command = `/${COMMAND_NAME} ${encodeReloadPayload({ continuationPrompt })}`;
+        const command = `/${COMMAND_NAME} ${encodeReloadPayload(payload)}`;
         const queued = storePendingReloadCommand(command);
         ctx.ui?.notify(queued
           ? "pi-reload-self: reload deferred until the current run settles; startup will be checked again"
@@ -118,9 +150,11 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
         checking = false;
       }
       if (commandGeneration !== generation || lifetime.signal.aborted) return;
-      ctx.ui?.notify(probeText(result), result.ok ? "info" : "error");
+      if (!origin) ctx.ui?.notify(probeText(result), result.ok ? "info" : "error");
       if (!result.ok) {
-        pi.sendMessage({ customType: "pi-reload-self", content: probeText(result), display: false, details: result });
+        if (requestId) requests.delete(requestId);
+        if (origin) publishReloadOutcome(pi, { ...origin, status: "blocked", probe: result });
+        else pi.sendMessage({ customType: "pi-reload-self", content: probeText(result), display: false, details: result });
       }
       if (!result.ok) return;
       if (!ctx.isIdle()) {
@@ -128,7 +162,8 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
         return;
       }
 
-      storeContinuationPrompt(continuationPrompt);
+      if (requestId) requests.delete(requestId);
+      storeContinuationPrompt(continuationPrompt, origin ? { ...origin, status: "reloaded", probe: result } : undefined);
       try {
         await ctx.reload();
       } catch (error) {
@@ -159,7 +194,7 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
           "Must be true. Confirms acceptance that reload can reset extension/module in-memory state and extension-maintained runtime state.",
       }),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       if (!params.confirm_state_loss) {
         return {
           content: [
@@ -174,6 +209,12 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
       }
 
       const continuationPrompt = validateContinuationPrompt(params.continuation_prompt);
+      const origin: ReloadOrigin = {
+        toolCallId,
+        parentToolCallId: roots.get(toolCallId) ?? toolCallId,
+        sessionId: ctx.sessionManager.getSessionId(),
+        anchorId: ctx.sessionManager.getLeafId(),
+      };
       if (checking || hasPendingReloadCommand()) {
         return {
           content: [{ type: "text", text: "Reload already queued or being checked; the existing continuation is unchanged." }],
@@ -194,7 +235,8 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
           details: { queued: false, reason: "startup-check-failed", probe },
         };
       }
-      const payload = encodeReloadPayload({ continuationPrompt });
+      const requestId = randomUUID();
+      const payload = encodeReloadPayload({ continuationPrompt, requestId });
       const command = `/${COMMAND_NAME} ${payload}`;
 
       if (!storePendingReloadCommand(command)) {
@@ -209,6 +251,7 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
         };
       }
 
+      requests.set(requestId, origin);
       return {
         content: [
           {
