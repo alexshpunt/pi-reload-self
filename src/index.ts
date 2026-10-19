@@ -93,13 +93,19 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
         return;
       }
 
-      if (!ctx.isIdle()) {
-        ctx.ui?.notify("pi-reload-self: wait for the current response to finish before reloading", "warning");
-        return;
-      }
-
       if (checking) {
         ctx.ui?.notify("pi-reload-self: a startup check is already running", "warning");
+        return;
+      }
+      const deferReload = () => {
+        const command = `/${COMMAND_NAME} ${encodeReloadPayload({ continuationPrompt })}`;
+        const queued = storePendingReloadCommand(command);
+        ctx.ui?.notify(queued
+          ? "pi-reload-self: reload deferred until the current run settles; startup will be checked again"
+          : "pi-reload-self: a reload is already queued; its continuation is unchanged", "warning");
+      };
+      if (!ctx.isIdle()) {
+        deferReload();
         return;
       }
       checking = true;
@@ -116,7 +122,11 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
       if (!result.ok) {
         pi.sendMessage({ customType: "pi-reload-self", content: probeText(result), display: false, details: result });
       }
-      if (!result.ok || !ctx.isIdle()) return;
+      if (!result.ok) return;
+      if (!ctx.isIdle()) {
+        deferReload();
+        return;
+      }
 
       storeContinuationPrompt(continuationPrompt);
       try {
