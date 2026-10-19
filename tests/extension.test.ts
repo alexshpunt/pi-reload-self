@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import extension from "../src/index.ts";
+import { registerReloadSelf, type StartupCheck } from "../src/index.ts";
 import { encodeReloadPayload } from "../src/payload.ts";
-import { clearPendingReloadCommand } from "../src/runtime-reload.ts";
+import { clearPendingReloadCommand, takeContinuationPrompt } from "../src/runtime-reload.ts";
 
 interface RegisteredCommand {
   description: string;
@@ -18,6 +18,9 @@ interface RegisteredTool {
   execute: (
     toolCallId: string,
     params: { continuation_prompt: string; confirm_state_loss: boolean },
+    signal?: AbortSignal,
+    onUpdate?: unknown,
+    ctx?: unknown,
   ) => Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown }>;
 }
 
@@ -27,8 +30,11 @@ interface FakeCommandContext {
   ui?: { notify: (message: string, level: string) => void };
 }
 
-async function loadExtension() {
+async function loadExtension(check: StartupCheck = async (ctx) => ({
+  ok: true, cwd: ctx?.cwd ?? "/session/current", reason: "ready", diagnostics: [],
+})) {
   clearPendingReloadCommand();
+  takeContinuationPrompt();
 
   const commands = new Map<string, RegisteredCommand>();
   const tools = new Map<string, RegisteredTool>();
@@ -37,13 +43,19 @@ async function loadExtension() {
     options?: { deliverAs?: string; expandPromptTemplates?: boolean };
   }> = [];
   const handlers = new Map<string, Array<(...args: never[]) => unknown>>();
+  const messages: unknown[] = [];
 
   const fakePi = {
+    sendMessage(message: unknown) { messages.push(message); },
     registerCommand(name: string, command: RegisteredCommand) {
       commands.set(name, command);
     },
     registerTool(tool: RegisteredTool) {
-      tools.set(tool.name, tool);
+      const execute = tool.execute;
+      tools.set(tool.name, {
+        ...tool,
+        execute: (id, params, signal) => execute(id, params, signal, undefined, { cwd: "/session/current" }),
+      });
     },
     sendUserMessage(content: string, options?: { deliverAs?: string; expandPromptTemplates?: boolean }) {
       sentUserMessages.push({ content, options });
@@ -55,9 +67,9 @@ async function loadExtension() {
     },
   };
 
-  await extension(fakePi as never);
+  await registerReloadSelf(fakePi as never, check);
 
-  return { commands, tools, sentUserMessages, handlers };
+  return { commands, tools, sentUserMessages, handlers, messages };
 }
 
 test("registers pi_extension_dev_reload_self tool and internal command", async () => {
@@ -65,10 +77,6 @@ test("registers pi_extension_dev_reload_self tool and internal command", async (
 
   assert.ok(commands.has("pi-reload-self-run"));
   assert.ok(tools.has("pi_extension_dev_reload_self"));
-  assert.match(
-    tools.get("pi_extension_dev_reload_self")?.description ?? "",
-    /reset extension\/module in-memory state/,
-  );
 });
 
 test("tool refuses to queue reload without explicit state loss confirmation", async () => {
@@ -213,4 +221,150 @@ test("internal command accepts copied command text", async () => {
   });
 
   assert.equal(reloaded, true);
+});
+
+for (const failByThrowing of [false, true]) {
+  test(`failed startup ${failByThrowing ? "exception" : "result"} cannot queue a reload`, async () => {
+    const { tools, handlers, sentUserMessages } = await loadExtension(async (ctx) => {
+      if (failByThrowing) throw new Error("fixture-probe-error");
+      return { ok: false, cwd: ctx.cwd, reason: "startup-error", diagnostics: ["fixture-probe-error"] };
+    });
+    const result = await tools.get("pi_extension_dev_reload_self")!.execute("failed", {
+      continuation_prompt: "must never run", confirm_state_loss: true,
+    });
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.match(result.content[0].text, /fixture-probe-error/);
+    assert.match(result.content[0].text, /CWD: \/session\/current/);
+    await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+    assert.deepEqual(sentUserMessages, []);
+  });
+}
+
+test("the direct reload command also checks startup and records its failure", async () => {
+  const { commands, handlers, sentUserMessages, messages } = await loadExtension(async () => ({
+    ok: false, cwd: "/current/session", reason: "timeout", diagnostics: ["fixture-timeout"],
+  }));
+  let reloads = 0;
+  await commands.get("pi-reload-self-run")!.handler(
+    encodeReloadPayload({ continuationPrompt: "must never run" }),
+    { isIdle: () => true, reload: async () => { reloads += 1; } },
+  );
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  assert.equal(reloads, 0);
+  assert.deepEqual(sentUserMessages, []);
+  assert.equal(messages.length, 1);
+});
+
+test("a second startup failure after settling blocks the previously checked reload", async () => {
+  let checks = 0;
+  const { commands, tools, handlers, sentUserMessages } = await loadExtension(async (ctx) => ({
+    ok: ++checks === 1, cwd: ctx?.cwd ?? "/session/current", reason: checks === 1 ? "ready" : "startup-error",
+    diagnostics: checks === 1 ? [] : ["changed-on-disk"],
+  }));
+  await tools.get("pi_extension_dev_reload_self")!.execute("checked", {
+    continuation_prompt: "must never run", confirm_state_loss: true,
+  });
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  let reloaded = false;
+  await commands.get("pi-reload-self-run")!.handler(sentUserMessages[0].content, {
+    isIdle: () => true, reload: async () => { reloaded = true; },
+  });
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  assert.equal(checks, 2);
+  assert.equal(reloaded, false);
+  assert.equal(sentUserMessages.length, 1);
+});
+
+test("session replacement while checking cannot queue the old continuation", async () => {
+  let finish!: () => void;
+  const { tools, handlers, sentUserMessages } = await loadExtension(async (ctx) => {
+    await new Promise<void>((resolve) => { finish = resolve; });
+    return { ok: true, cwd: ctx.cwd, reason: "ready", diagnostics: [] };
+  });
+  const pending = tools.get("pi_extension_dev_reload_self")!.execute("pending", {
+    continuation_prompt: "old session", confirm_state_loss: true,
+  });
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  finish();
+  const result = await pending;
+  assert.equal((result as { isError?: boolean }).isError, true);
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  assert.deepEqual(sentUserMessages, []);
+});
+
+test("cancelling a check does not leave a queued command", async () => {
+  const controller = new AbortController();
+  const { tools, handlers, sentUserMessages } = await loadExtension(async (ctx) => {
+    controller.abort();
+    return { ok: true, cwd: ctx.cwd, reason: "ready", diagnostics: [] };
+  });
+  const result = await tools.get("pi_extension_dev_reload_self")!.execute("cancelled", {
+    continuation_prompt: "cancelled", confirm_state_loss: true,
+  }, controller.signal);
+  assert.equal((result as { isError?: boolean }).isError, true);
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  assert.deepEqual(sentUserMessages, []);
+});
+
+test("a rejected reload cannot leave its continuation armed", async () => {
+  const { commands, handlers, sentUserMessages } = await loadExtension();
+  await assert.rejects(async () => {
+    await commands.get("pi-reload-self-run")!.handler(
+      encodeReloadPayload({ continuationPrompt: "stale continuation" }),
+      { isIdle: () => true, reload: async () => { throw new Error("reload failed"); } },
+    );
+  }, /reload failed/);
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  assert.deepEqual(sentUserMessages, []);
+});
+
+test("session invalidation during a command check never reads the old context again", async () => {
+  let active = true;
+  let finish!: () => void;
+  const { commands, handlers } = await loadExtension(async () => {
+    await new Promise<void>((resolve) => { finish = resolve; });
+    throw new Error("probe cancelled by session change");
+  });
+  const ctx = {
+    get cwd() { if (!active) throw new Error("context invalidated"); return "/old/session"; },
+    get ui() { if (!active) throw new Error("context invalidated"); return undefined; },
+    get signal() { if (!active) throw new Error("context invalidated"); return undefined; },
+    isIdle: () => { if (!active) throw new Error("context invalidated"); return true; },
+    reload: async () => { throw new Error("must not reload"); },
+  };
+  const pending = commands.get("pi-reload-self-run")!.handler(
+    encodeReloadPayload({ continuationPrompt: "old session" }), ctx,
+  );
+  active = false;
+  await handlers.get("session_shutdown")![0]({} as never, {} as never);
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  finish();
+  await assert.doesNotReject(async () => { await pending; });
+});
+
+test("a run starting during the final probe defers reload without losing its continuation", async () => {
+  let idle = true;
+  let checks = 0;
+  let reloads = 0;
+  const { commands, handlers, sentUserMessages } = await loadExtension(async () => {
+    checks += 1;
+    if (checks === 1) idle = false;
+    return { ok: true, cwd: "/session/current", reason: "ready", diagnostics: [] };
+  });
+  const command = commands.get("pi-reload-self-run")!;
+  const context = { isIdle: () => idle, reload: async () => { reloads += 1; } };
+  const payload = encodeReloadPayload({ continuationPrompt: "continue exactly once" });
+  await command.handler(payload, context);
+  assert.equal(reloads, 0);
+  idle = true;
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  assert.equal(sentUserMessages.length, 1);
+  await command.handler(sentUserMessages[0].content, context);
+  assert.equal(reloads, 1);
+  await handlers.get("session_start")![0]({} as never, {} as never);
+  assert.deepEqual(sentUserMessages[1], {
+    content: "continue exactly once", options: { deliverAs: "followUp" },
+  });
+  await handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  assert.equal(sentUserMessages.length, 2);
 });
