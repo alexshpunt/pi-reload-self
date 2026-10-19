@@ -1,5 +1,8 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+
+import { createProbeLaunch } from "./probe-launch.ts";
+import { probeStartup, type StartupProbeResult } from "./startup-probe.ts";
 
 import {
   decodeReloadPayload,
@@ -9,6 +12,8 @@ import {
 } from "./payload.ts";
 import {
   clearPendingReloadCommand,
+  hasPendingReloadCommand,
+  getInitialLaunchCwd,
   storeContinuationPrompt,
   storePendingReloadCommand,
   takeContinuationPrompt,
@@ -18,8 +23,41 @@ import {
 const COMMAND_NAME = "pi-reload-self-run";
 const TOOL_NAME = "pi_extension_dev_reload_self";
 
-export default async function reloadSelfExtension(pi: ExtensionAPI): Promise<void> {
+/** Startup gate shared by the tool and direct command paths. */
+export type StartupCheck = (ctx: ExtensionContext, signal: AbortSignal) => Promise<StartupProbeResult>;
+
+function probeText(result: StartupProbeResult): string {
+  const status = result.ok ? "Startup check passed" : "Reload blocked: startup check failed";
+  const diagnostics = result.diagnostics.join("\n");
+  return `${status}.\nCWD: ${result.cwd}\n${diagnostics}`.trimEnd();
+}
+
+/** Register reload orchestration around an isolated, cancellable startup check. */
+export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck): Promise<void> {
+  let lifetime = new AbortController();
+  let generation = 0;
+  let checking = false;
+  const checkStartup: StartupCheck = async (ctx, signal) => {
+    const currentGeneration = generation;
+    const cwd = ctx.cwd;
+    const sessionSignal = lifetime.signal;
+    let result: StartupProbeResult;
+    try {
+      result = await check(ctx, AbortSignal.any([signal, sessionSignal]));
+    } catch (error) {
+      result = { ok: false, cwd, reason: "process-error", diagnostics: [error instanceof Error ? error.message : String(error)] };
+    }
+    if (currentGeneration !== generation || signal.aborted || sessionSignal.aborted) {
+      return { ok: false, cwd, reason: "cancelled", diagnostics: ["Startup check cancelled: session changed or operation aborted."] };
+    }
+    return result;
+  };
+
+  pi.on("session_shutdown", async () => { lifetime.abort(); });
   pi.on("session_start", async (_event, _ctx) => {
+    lifetime.abort();
+    lifetime = new AbortController();
+    generation += 1;
     // A pending command belongs to the run that created it. If the session is
     // replaced or reloaded before that run settles, do not carry it forward.
     clearPendingReloadCommand();
@@ -60,8 +98,33 @@ export default async function reloadSelfExtension(pi: ExtensionAPI): Promise<voi
         return;
       }
 
+      if (checking) {
+        ctx.ui?.notify("pi-reload-self: a startup check is already running", "warning");
+        return;
+      }
+      checking = true;
+      let result: StartupProbeResult;
+      const commandGeneration = generation;
+      try {
+        // Recheck immediately before reload: files or CWD may have changed while settling.
+        result = await checkStartup(ctx, ctx.signal ?? new AbortController().signal);
+      } finally {
+        checking = false;
+      }
+      if (commandGeneration !== generation || lifetime.signal.aborted) return;
+      ctx.ui?.notify(probeText(result), result.ok ? "info" : "error");
+      if (!result.ok) {
+        pi.sendMessage({ customType: "pi-reload-self", content: probeText(result), display: false, details: result });
+      }
+      if (!result.ok || !ctx.isIdle()) return;
+
       storeContinuationPrompt(continuationPrompt);
-      await ctx.reload();
+      try {
+        await ctx.reload();
+      } catch (error) {
+        takeContinuationPrompt();
+        throw error;
+      }
       return;
     },
   });
@@ -86,7 +149,7 @@ export default async function reloadSelfExtension(pi: ExtensionAPI): Promise<voi
           "Must be true. Confirms acceptance that reload can reset extension/module in-memory state and extension-maintained runtime state.",
       }),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!params.confirm_state_loss) {
         return {
           content: [
@@ -101,6 +164,26 @@ export default async function reloadSelfExtension(pi: ExtensionAPI): Promise<voi
       }
 
       const continuationPrompt = validateContinuationPrompt(params.continuation_prompt);
+      if (checking || hasPendingReloadCommand()) {
+        return {
+          content: [{ type: "text", text: "Reload already queued or being checked; the existing continuation is unchanged." }],
+          details: { queued: false, reason: "already-queued" },
+        };
+      }
+      checking = true;
+      let probe: StartupProbeResult;
+      try {
+        probe = await checkStartup(ctx, signal ?? ctx.signal ?? new AbortController().signal);
+      } finally {
+        checking = false;
+      }
+      if (!probe.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: probeText(probe) }],
+          details: { queued: false, reason: "startup-check-failed", probe },
+        };
+      }
       const payload = encodeReloadPayload({ continuationPrompt });
       const command = `/${COMMAND_NAME} ${payload}`;
 
@@ -121,11 +204,17 @@ export default async function reloadSelfExtension(pi: ExtensionAPI): Promise<voi
           {
             type: "text",
             text:
-              "Pi reload is scheduled for the agent_settled event. The encoded command will then dispatch and the provided continuation prompt will be sent by the reloaded extension runtime.",
+              `${probeText(probe)}\nPi reload is scheduled for agent_settled and will be rechecked immediately before reload.`,
           },
         ],
         details: { queued: true, reason: "scheduled-after-settled" },
       };
     },
   });
+}
+
+/** Load the real CLI startup gate for normal Pi extension use. */
+export default async function reloadSelfExtension(pi: ExtensionAPI): Promise<void> {
+  const launchCwd = getInitialLaunchCwd();
+  await registerReloadSelf(pi, (ctx, signal) => probeStartup({ ...createProbeLaunch(ctx, launchCwd), signal }));
 }
