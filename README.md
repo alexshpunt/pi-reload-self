@@ -52,6 +52,10 @@ Flow:
 4. The command checks startup again immediately before `ctx.reload()`, so a change made while the agent was settling cannot bypass the check. Direct calls to the internal command use the same check.
 5. After a successful reload, the reloaded extension sends the continuation prompt as a follow-up user message.
 
+The tool's first result is a scheduling receipt, not proof that Pi reloaded. After the final startup check, a tool-initiated reload gets one saved outcome linked to its original visible call. Nested calls use the outer tool's real execution identity. Stereo View shows the outcome beside that call without a second card in Conversation; the original receipt and chronological session history stay unchanged.
+
+A blocked final check leaves Pi running and sends the full diagnostics to the agent. A successful outcome is recorded only when the fresh runtime starts, then the requested continuation is sent once. The visible summary stays separate from the full agent-facing data. Direct `/pi-reload-self-run` commands do not acquire tool-call ownership.
+
 The probe runs extension startup handlers, so those handlers can repeat their external side effects. RPC startup does not verify TUI-only code. SDK hosts whose launch configuration cannot be reproduced are refused rather than checked with a different configuration.
 
 The extension reloads in place; it does not create a new session. The pending command is consumed once at `agent_settled`, and is cleared if a session is replaced/reloaded before it settles. The command handoff uses Pi's public command-dispatch API; no Pi internal modules are patched and no manual editor submission is required.
