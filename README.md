@@ -56,9 +56,13 @@ The tool's first result is a scheduling receipt, not proof that Pi reloaded. Aft
 
 A blocked final check leaves Pi running and sends the full diagnostics to the agent. A successful outcome is recorded only when the fresh runtime starts, then the requested continuation is sent once. The visible summary stays separate from the full agent-facing data. Direct `/pi-reload-self-run` commands do not acquire tool-call ownership.
 
+Another operation can replace the session runtime before a scheduled reload runs, such as a deferred Teleport return, `/resume` or another reload. The reload is then cancelled, not dropped silently. The next runtime shows one "Reload cancelled" summary at the original call and sends the agent the full cancellation with its cause. The cancellation does not start a turn of its own; the agent receives it with its next turn. That request never reloads Pi and never sends its continuation. To reload afterwards, call the tool again.
+
+The cancellation is reported only when the next runtime still owns the original session branch. Another session or an abandoned branch never receives it. A replacement in a different Pi process cannot be reported: for example, Teleport inside Herdr starts a new process and quits the old one. In that case the scheduled reload is lost without a cancellation.
+
 The probe runs extension startup handlers, so those handlers can repeat their external side effects. RPC startup does not verify TUI-only code. SDK hosts whose launch configuration cannot be reproduced are refused rather than checked with a different configuration.
 
-The extension reloads in place; it does not create a new session. The pending command is consumed once at `agent_settled`, and is cleared if a session is replaced/reloaded before it settles. The command handoff uses Pi's public command-dispatch API; no Pi internal modules are patched and no manual editor submission is required.
+The extension reloads in place; it does not create a new session. The pending command is consumed once at `agent_settled`. A replaced or reloaded runtime never carries it forward; tool-scheduled requests are cancelled as described above. The command handoff uses Pi's public command-dispatch API; no Pi internal modules are patched and no manual editor submission is required.
 
 ## Compatibility
 
