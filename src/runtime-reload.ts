@@ -1,9 +1,18 @@
+import type { ReloadOutcome } from "./reload-outcome.ts";
+
+/** Plain data transferred to the fresh runtime after a successful reload. */
+export interface ReloadContinuation {
+  prompt: string;
+  outcome?: ReloadOutcome;
+}
 const CONTINUATION_SLOT = "__piReloadSelfContinuationPrompt";
+const OUTCOME_SLOT = "__piReloadSelfOutcome";
 const PENDING_COMMAND_SLOT = "__piReloadSelfPendingCommand";
 const LAUNCH_CWD_SLOT = "__piReloadSelfLaunchCwd";
 
 interface ReloadSelfGlobalState {
   [CONTINUATION_SLOT]?: string;
+  [OUTCOME_SLOT]?: ReloadOutcome;
   [PENDING_COMMAND_SLOT]?: string;
   [LAUNCH_CWD_SLOT]?: string;
 }
@@ -17,15 +26,19 @@ export function getInitialLaunchCwd(): string {
   const state = globalState();
   return state[LAUNCH_CWD_SLOT] ??= process.cwd();
 }
-export function storeContinuationPrompt(prompt: string): void {
-  globalState()[CONTINUATION_SLOT] = prompt;
+export function storeContinuationPrompt(prompt: string, outcome?: ReloadOutcome): void {
+  const state = globalState();
+  state[CONTINUATION_SLOT] = prompt;
+  state[OUTCOME_SLOT] = outcome;
 }
 
-export function takeContinuationPrompt(): string | undefined {
+export function takeContinuationPrompt(): ReloadContinuation | undefined {
   const state = globalState();
   const prompt = state[CONTINUATION_SLOT];
+  const outcome = state[OUTCOME_SLOT];
   delete state[CONTINUATION_SLOT];
-  return prompt;
+  delete state[OUTCOME_SLOT];
+  return prompt === undefined ? undefined : { prompt, outcome };
 }
 
 /** Whether a checked reload is already waiting for the originating run to settle. */

@@ -1,5 +1,7 @@
 export interface ReloadPayload {
   continuationPrompt: string;
+  /** Opaque reference to a request owned by the current extension runtime, never an owner supplied by a command. */
+  requestId?: string;
 }
 
 const INVALID_PAYLOAD_MESSAGE = "Invalid reload payload";
@@ -22,6 +24,7 @@ export function validateContinuationPrompt(value: unknown): string {
 export function encodeReloadPayload(payload: ReloadPayload): string {
   const normalized: ReloadPayload = {
     continuationPrompt: validateContinuationPrompt(payload.continuationPrompt),
+    ...(payload.requestId === undefined ? {} : { requestId: payload.requestId }),
   };
 
   return Buffer.from(JSON.stringify(normalized), "utf8").toString("base64url");
@@ -57,7 +60,11 @@ export function decodeReloadPayload(encoded: string): ReloadPayload {
       (parsed as { continuationPrompt?: unknown }).continuationPrompt,
     );
 
-    return { continuationPrompt };
+    const requestId = (parsed as { requestId?: unknown }).requestId;
+    if (requestId !== undefined && (typeof requestId !== "string" || requestId.length === 0)) {
+      throw new Error("Invalid request identity");
+    }
+    return { continuationPrompt, ...(requestId === undefined ? {} : { requestId }) };
   } catch (error) {
     throw new Error(INVALID_PAYLOAD_MESSAGE, { cause: error });
   }
