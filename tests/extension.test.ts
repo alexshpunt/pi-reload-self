@@ -485,3 +485,90 @@ for (const reason of ["new", "reload"]) {
     assert.deepEqual(fixture.messages, []);
   });
 }
+
+async function scheduleRootedReload(fixture: Awaited<ReturnType<typeof loadExtension>>, nested: boolean) {
+  const emit = (name: string, event: object) => fixture.handlers.get(name)?.[0]?.(event as never, {} as never);
+  await emit("tool_execution_start", { toolCallId: "outer", toolName: "codemode" });
+  if (nested) await emit("tool_execution_start", { toolCallId: "middle", parentToolCallId: "outer", toolName: "wrapper" });
+  await emit("tool_execution_start", {
+    toolCallId: "reload-leaf", ...(nested ? { parentToolCallId: "middle" } : {}), toolName: "pi_extension_dev_reload_self",
+  });
+  await fixture.tools.get("pi_extension_dev_reload_self")!.execute("reload-leaf", {
+    continuation_prompt: "must not run", confirm_state_loss: true,
+  });
+}
+
+for (const nested of [false, true]) {
+  test(`a ${nested ? "nested" : "direct"} reload still queued when its runtime is replaced is cancelled at its visible call once`, async () => {
+    const fixture = await loadExtension();
+    await scheduleRootedReload(fixture, nested);
+    await fixture.handlers.get("session_shutdown")![0]({ reason: "resume" } as never, {} as never);
+    await fixture.handlers.get("session_start")![0]({ reason: "resume" } as never, {} as never);
+    await fixture.handlers.get("session_start")![0]({ reason: "resume" } as never, {} as never);
+    await fixture.handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+    assert.deepEqual(fixture.sentUserMessages, [], "neither the reload command nor its continuation is sent");
+    assert.deepEqual(fixture.entries.map(entry => [entry.data.parentToolCallId, entry.data.status]), [[nested ? "outer" : "reload-leaf", "cancelled"]]);
+    assert.equal(fixture.messages.length, 1);
+    const delivery = fixture.messages[0] as any;
+    assert.equal(delivery.display, false);
+    assert.equal(delivery.details.toolCallId, "reload-leaf");
+    assert.equal(delivery.details.cause, "resume");
+    assert.match(delivery.content, /Reload cancelled[\s\S]*"resume"[\s\S]*Call pi_extension_dev_reload_self again/);
+  });
+}
+
+test("a reload whose final check is running when its runtime is replaced is cancelled and never reloads", async () => {
+  let checks = 0;
+  let finish!: () => void;
+  const fixture = await loadExtension(async () => {
+    if (++checks === 2) await new Promise<void>(resolve => { finish = resolve; });
+    return { ok: true, cwd: "/session/current", reason: "ready", diagnostics: [] };
+  });
+  await fixture.tools.get("pi_extension_dev_reload_self")!.execute("checking-owner", {
+    continuation_prompt: "must not run", confirm_state_loss: true,
+  });
+  await fixture.handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  let reloads = 0;
+  const pending = fixture.commands.get("pi-reload-self-run")!.handler(fixture.sentUserMessages[0].content, {
+    isIdle: () => true, reload: async () => { reloads++; },
+  });
+  await fixture.handlers.get("session_shutdown")![0]({ reason: "resume" } as never, {} as never);
+  await fixture.handlers.get("session_start")![0]({ reason: "resume" } as never, {} as never);
+  finish();
+  await pending;
+  assert.equal(reloads, 0);
+  assert.deepEqual(fixture.entries.map(entry => [entry.data.parentToolCallId, entry.data.status]), [["checking-owner", "cancelled"]]);
+  assert.equal(fixture.sentUserMessages.length, 1, "only the original command was dispatched");
+});
+
+for (const [name, shutdown, start] of [
+  ["another session", { reason: "new" }, { sessionManager: { getSessionId: () => "another-session", getBranch: () => [] } }],
+  ["an abandoned branch", { reason: "resume" }, { sessionManager: { getSessionId: () => "fixture-session", getBranch: () => [{ id: "other" }] } }],
+  ["a quitting runtime", { reason: "quit" }, {}],
+] as const) {
+  test(`a cancelled reload is not reported to ${name}`, async () => {
+    const fixture = await loadExtension();
+    await fixture.tools.get("pi_extension_dev_reload_self")!.execute("owner", {
+      continuation_prompt: "must not run", confirm_state_loss: true,
+    });
+    await fixture.handlers.get("session_shutdown")![0](shutdown as never, {} as never);
+    await fixture.handlers.get("session_start")![0]({ reason: "resume" } as never, start as never);
+    await fixture.handlers.get("session_start")![0]({ reason: "resume" } as never, {} as never);
+    assert.deepEqual(fixture.entries, []);
+    assert.deepEqual(fixture.messages, []);
+  });
+}
+
+test("a request consumed by its own reload is reported as reloaded, never cancelled", async () => {
+  const fixture = await loadExtension();
+  await fixture.tools.get("pi_extension_dev_reload_self")!.execute("own-reload", {
+    continuation_prompt: "continue", confirm_state_loss: true,
+  });
+  await fixture.handlers.get("agent_settled")![0]({} as never, { isIdle: () => true } as never);
+  await fixture.commands.get("pi-reload-self-run")!.handler(fixture.sentUserMessages[0].content, {
+    isIdle: () => true, reload: async () => {},
+  });
+  await fixture.handlers.get("session_shutdown")![0]({ reason: "reload" } as never, {} as never);
+  await fixture.handlers.get("session_start")![0]({ reason: "reload" } as never, {} as never);
+  assert.deepEqual(fixture.entries.map(entry => entry.data.status), ["reloaded"]);
+});
