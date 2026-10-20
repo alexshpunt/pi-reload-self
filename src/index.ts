@@ -16,8 +16,10 @@ import {
   clearPendingReloadCommand,
   hasPendingReloadCommand,
   getInitialLaunchCwd,
+  storeCancelledOutcomes,
   storeContinuationPrompt,
   storePendingReloadCommand,
+  takeCancelledOutcomes,
   takeContinuationPrompt,
   takePendingReloadCommand,
 } from "./runtime-reload.ts";
@@ -66,7 +68,14 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
     return result;
   };
 
-  pi.on("session_shutdown", async () => { lifetime.abort(); });
+  pi.on("session_shutdown", async event => {
+    lifetime.abort();
+    // An unconsumed request can never run after its runtime is replaced. The
+    // next runtime reports its cancellation only if it still owns the origin.
+    if (event.reason !== "quit") {
+      storeCancelledOutcomes([...requests.values()].map(origin => ({ ...origin, status: "cancelled", cause: event.reason })));
+    }
+  });
   pi.on("session_tree", () => {
     lifetime.abort();
     lifetime = new AbortController();
@@ -85,6 +94,7 @@ export async function registerReloadSelf(pi: ExtensionAPI, check: StartupCheck):
 
     roots.clear();
     requests.clear();
+    for (const cancelled of takeCancelledOutcomes()) if (ownsBranch(cancelled, ctx)) publishReloadOutcome(pi, cancelled);
     const continuation = takeContinuationPrompt();
     if (continuation && (!continuation.outcome || (event.reason === "reload" && ownsBranch(continuation.outcome, ctx)))) {
       if (continuation.outcome) publishReloadOutcome(pi, continuation.outcome);

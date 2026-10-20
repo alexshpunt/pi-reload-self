@@ -8,12 +8,14 @@ export interface ReloadContinuation {
 const CONTINUATION_SLOT = "__piReloadSelfContinuationPrompt";
 const OUTCOME_SLOT = "__piReloadSelfOutcome";
 const PENDING_COMMAND_SLOT = "__piReloadSelfPendingCommand";
+const CANCELLED_SLOT = "__piReloadSelfCancelledOutcomes";
 const LAUNCH_CWD_SLOT = "__piReloadSelfLaunchCwd";
 
 interface ReloadSelfGlobalState {
   [CONTINUATION_SLOT]?: string;
   [OUTCOME_SLOT]?: ReloadOutcome;
   [PENDING_COMMAND_SLOT]?: string;
+  [CANCELLED_SLOT]?: ReloadOutcome[];
   [LAUNCH_CWD_SLOT]?: string;
 }
 
@@ -39,6 +41,18 @@ export function takeContinuationPrompt(): ReloadContinuation | undefined {
   delete state[CONTINUATION_SLOT];
   delete state[OUTCOME_SLOT];
   return prompt === undefined ? undefined : { prompt, outcome };
+}
+
+/** Hand requests invalidated by a runtime shutdown to the next runtime, which alone can report them. */
+export function storeCancelledOutcomes(outcomes: ReloadOutcome[]): void {
+  globalState()[CANCELLED_SLOT] = outcomes;
+}
+
+export function takeCancelledOutcomes(): ReloadOutcome[] {
+  const state = globalState();
+  const outcomes = state[CANCELLED_SLOT] ?? [];
+  delete state[CANCELLED_SLOT];
+  return outcomes;
 }
 
 /** Whether a checked reload is already waiting for the originating run to settle. */
