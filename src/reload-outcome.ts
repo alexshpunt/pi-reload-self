@@ -31,7 +31,7 @@ const COLORS = { reloaded: "success", blocked: "error", cancelled: "warning" } a
 function agentText(outcome: ReloadOutcome): string {
   const lines = outcome.status === "cancelled"
     ? [`Cause: the runtime shut down for "${outcome.cause}" while the reload was still queued or being checked.`,
-      "Call pi_extension_dev_reload_self again if a reload is still needed."]
+      "Call reload_pi again if a reload is still needed."]
     : [`CWD: ${outcome.probe.cwd}`, ...outcome.probe.diagnostics];
   return [SUMMARIES[outcome.status], ...lines].join("\n").trimEnd();
 }

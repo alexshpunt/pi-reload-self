@@ -5,7 +5,7 @@ export interface ReloadPayload {
 }
 
 const INVALID_PAYLOAD_MESSAGE = "Invalid reload payload";
-const INVALID_PROMPT_MESSAGE = "continuation_prompt must be a non-empty string";
+const INVALID_PROMPT_MESSAGE = "next_action must be a non-empty string";
 const BASE64URL_TOKEN_PATTERN = /^[A-Za-z0-9_-]+={0,2}$/;
 
 export function validateContinuationPrompt(value: unknown): string {
