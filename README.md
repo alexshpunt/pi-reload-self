@@ -1,21 +1,18 @@
 # pi-reload-self
 
-Pi extension development helper that lets agents reload Pi and continue in the same session.
+A Pi extension that lets agents reload Pi to apply changes and continue in the same session.
 
 It registers one LLM-callable tool:
 
 ```ts
-pi_extension_dev_reload_self({
-  continuation_prompt: "Continue after reload...",
-  confirm_state_loss: true,
+reload_pi({
+  next_action: "Verify the updated extension",
 })
 ```
 
 ## Warning
 
-Reloading Pi can reset extension/module in-memory state, hot-loaded resources, timers, watchers, and other extension-maintained runtime state. Use this only when you explicitly want Pi to reload extensions, skills, prompts, and themes.
-
-The tool requires `confirm_state_loss: true` so agents cannot queue a reload accidentally.
+Reloading Pi can reset extension/module in-memory state, hot-loaded resources, timers, watchers, and other extension-maintained runtime state. The conversation and session remain available.
 
 ## Install
 
@@ -39,18 +36,15 @@ pi install /path/to/pi-reload-self
 
 ## Tool behavior
 
-`pi_extension_dev_reload_self` accepts:
-
-- `continuation_prompt` — non-empty prompt sent after reload.
-- `confirm_state_loss` — must be `true`.
+`reload_pi` accepts `next_action`: a non-empty description of what to do after reload. The conversation persists, so do not repeat context already in it. Use the tool when changes require a reload, such as changes to extensions or MCP configuration.
 
 Flow:
 
-1. The tool validates the prompt and confirmation, then starts a separate Pi RPC process in the current session’s working directory. It inherits the running CLI installation, environment, global and project settings, trust decision, and explicit resource-loading options. It does not resume the conversation or send a model prompt.
+1. The tool validates the next action, then starts a separate Pi RPC process in the current session’s working directory. It inherits the running CLI installation, environment, global and project settings, trust decision, and explicit resource-loading options. It does not resume the conversation or send a model prompt.
 2. The probe waits for startup handlers and an RPC readiness response. Startup errors or a 60-second timeout block reload; warnings are reported without blocking it. The probe is closed after every outcome, including cancellation.
 3. If startup succeeds, the tool queues one internal `/pi-reload-self-run ...` command. On Pi’s public `agent_settled` event, the extension dispatches it with `expandPromptTemplates: true`.
 4. The command checks startup again immediately before `ctx.reload()`, so a change made while the agent was settling cannot bypass the check. Direct calls to the internal command use the same check.
-5. After a successful reload, the reloaded extension sends the continuation prompt as a follow-up user message.
+5. After a successful reload, the reloaded extension sends the next action as a follow-up user message.
 
 The tool's first result is a scheduling receipt, not proof that Pi reloaded. After the final startup check, a tool-initiated reload gets one saved outcome linked to its original visible call. Nested calls use the outer tool's real execution identity. Stereo View shows the outcome beside that call without a second card in Conversation; the original receipt and chronological session history stay unchanged.
 
