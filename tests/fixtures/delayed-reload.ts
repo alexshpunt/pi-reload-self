@@ -19,8 +19,8 @@ export default async function delayedReloadFixture(pi: ExtensionAPI): Promise<vo
     name: "nested_reload", label: "Nested reload", description: "Call the reload tool through the real nested execution API.",
     parameters: Type.Object({}),
     async execute(_id, _params, signal, _update, ctx) {
-      const outcome = await ctx.executeTool("pi_extension_dev_reload_self", {
-        continuation_prompt: "CONTINUATION_EXACT_TEXT", confirm_state_loss: true,
+      const outcome = await ctx.executeTool("reload_pi", {
+        next_action: "CONTINUATION_EXACT_TEXT",
       }, { signal });
       return { ...outcome.result, isError: outcome.isError };
     },

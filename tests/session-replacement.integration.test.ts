@@ -19,13 +19,13 @@ for (const scenario of ["direct", "nested"] as const) {
       cwd: directory, isolateUserResources: true, rawMode: false,
       extensions: [join(root, "tests/fixtures/session-replacement.ts"), join(root, "tests/fixtures/delayed-reload.ts"),
         ...(process.env.RELOAD_STEREO_EXTENSION ? [process.env.RELOAD_STEREO_EXTENSION] : [])],
-      tools: ["replace_session", "pi_extension_dev_reload_self", "nested_reload"],
+      tools: ["replace_session", "reload_pi", "nested_reload"],
       environment: { RELOAD_RECORD_DIR: directory, RELOAD_DELAYED_CASE: "direct", PI_OFFLINE: "1" },
       conversation: [
         assistantMessage([toolCall({ id: "replace", name: "replace_session", arguments: {} })], { stopReason: "toolUse" }),
         assistantMessage([toolCall({
-          id: "visible-root", name: scenario === "nested" ? "nested_reload" : "pi_extension_dev_reload_self",
-          arguments: scenario === "nested" ? {} : { continuation_prompt: "CONTINUATION_EXACT_TEXT", confirm_state_loss: true },
+          id: "visible-root", name: scenario === "nested" ? "nested_reload" : "reload_pi",
+          arguments: scenario === "nested" ? {} : { next_action: "CONTINUATION_EXACT_TEXT" },
         })], { stopReason: "toolUse" }),
         assistantMessage([text("The reload has only been scheduled.")]),
         assistantMessage([text("The replacement finished and the reload was cancelled.")]),
