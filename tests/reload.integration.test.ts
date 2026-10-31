@@ -22,13 +22,13 @@ test("a real Pi tool call blocks a broken startup and leaves the original sessio
     isolateUserResources: true,
     rawMode: false,
     extensions: [join(root, "src/index.ts"), join(root, "tests/fixtures/arm-startup-failure.ts")],
-    tools: ["arm_startup_failure", "pi_extension_dev_reload_self"],
+    tools: ["arm_startup_failure", "reload_pi"],
     environment: { PI_CODING_AGENT_DIR: agentDir, RELOAD_FIXTURE_DIR: directory, PI_OFFLINE: "1" },
     conversation: [
       assistantMessage([toolCall({ id: "arm", name: "arm_startup_failure", arguments: {} })], { stopReason: "toolUse" }),
       assistantMessage([toolCall({
-        id: "reload", name: "pi_extension_dev_reload_self",
-        arguments: { continuation_prompt: "THIS_CONTINUATION_MUST_NOT_RUN", confirm_state_loss: true },
+        id: "reload", name: "reload_pi",
+        arguments: { next_action: "THIS_CONTINUATION_MUST_NOT_RUN" },
       })], { stopReason: "toolUse" }),
       assistantMessage([text("The original session is still usable.")]),
     ],

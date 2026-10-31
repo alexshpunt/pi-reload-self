@@ -18,12 +18,12 @@ for (const scenario of ["direct", "nested", "blocked"] as const) {
       cwd: directory, isolateUserResources: true, rawMode: false,
       extensions: [join(root, "tests/fixtures/delayed-reload.ts"),
         ...(process.env.RELOAD_STEREO_EXTENSION ? [process.env.RELOAD_STEREO_EXTENSION] : [])],
-      tools: ["pi_extension_dev_reload_self", "nested_reload"],
+      tools: ["reload_pi", "nested_reload"],
       environment: { RELOAD_RECORD_DIR: directory, RELOAD_DELAYED_CASE: scenario, PI_OFFLINE: "1" },
       conversation: [
         assistantMessage([toolCall({
-          id: "visible-root", name: scenario === "nested" ? "nested_reload" : "pi_extension_dev_reload_self",
-          arguments: scenario === "nested" ? {} : { continuation_prompt: "CONTINUATION_EXACT_TEXT", confirm_state_loss: true },
+          id: "visible-root", name: scenario === "nested" ? "nested_reload" : "reload_pi",
+          arguments: scenario === "nested" ? {} : { next_action: "CONTINUATION_EXACT_TEXT" },
         })], { stopReason: "toolUse" }),
         assistantMessage([text("The reload has only been scheduled.")]),
         assistantMessage([text("The delayed outcome was received.")]),
