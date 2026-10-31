@@ -15,14 +15,14 @@ test("validateContinuationPrompt returns trimmed non-empty prompt", () => {
 test("validateContinuationPrompt rejects empty prompts", () => {
   assert.throws(
     () => validateContinuationPrompt("   "),
-    /continuation_prompt must be a non-empty string/,
+    /next_action must be a non-empty string/,
   );
 });
 
 test("validateContinuationPrompt rejects non-string prompts", () => {
   assert.throws(
     () => validateContinuationPrompt(null),
-    /continuation_prompt must be a non-empty string/,
+    /next_action must be a non-empty string/,
   );
 });
 
